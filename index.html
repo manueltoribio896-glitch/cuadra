@@ -1002,7 +1002,7 @@ function verdictChip(A, small){
 /* ───────────── UI base ───────────── */
 let R = {v:'home', p:{}};
 const TABS = ['home','lecturas','facturas','apagones','reclamos'];
-const HASH = {home:'inicio', lecturas:'lecturas', facturas:'facturas', apagones:'apagones', reclamos:'reclamos', ajustes:'ajustes'};
+const HASH = {home:'inicio', lecturas:'lecturas', facturas:'facturas', apagones:'apagones', reclamos:'reclamos', ajustes:'ajustes', aparatos:'aparatos'};
 function go(v, p={}, opts={}){ R = {v, p}; if(!opts.noHash){ const h = HASH[v]; try{ if(h && location.hash!=='#'+h) history.replaceState(null,'','#'+h); }catch(e){} } render(); window.scrollTo(0,0); }
 function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(toast._t); toast._t=setTimeout(()=>t.classList.remove('show'), 3200); }
 let rerenderTimer=null; function rerenderSoft(){ clearTimeout(rerenderTimer); rerenderTimer=setTimeout(()=>{ if(!document.querySelector('.overlay') && !document.activeElement.matches('input,textarea,select')) render(); }, 50); }
@@ -1064,6 +1064,8 @@ function parseBillItems(items){
     for(let k=0;k<13;k++){ r.hist.push({ym: y+'-'+String(mo).padStart(2,'0'), kwh:+vals[k]}); mo++; if(mo>12){ mo=1; y++; } }
     break;
   }
+  m = T.match(/\|\s*(RD\$[\d,.]+|0)\s*\|\s*RD\$([\d,.]+)\s*\|\s*FACTURADO MES/i);
+  if(m){ r.balance = m[1]==='0' ? 0 : n(m[1].replace('RD$','')); r.totalPagar = n(m[2]); }
   r.ok = !!(r.desde && r.hasta && r.kwh!=null);
   return r;
 }
@@ -1175,7 +1177,9 @@ async function upsertParsedBill(P, image){
   const ex = S.bills.find(x=>!x.hist && ((P.numero && x.numero===P.numero) || x.hasta===P.hasta));
   const b = ex ? Object.assign({}, ex) : {id: P.numero ? 'edn_'+P.numero : newId(), creado:Date.now()};
   Object.assign(b, {desde:P.desde, hasta:P.hasta, kwh:P.kwh, monto:P.monto??b.monto??null, lecturaAnterior:P.lecturaAnterior??null, lecturaActual:P.lecturaActual??null,
-    emision:P.emision||'', vence:P.vence||'', numero:P.numero||b.numero||'', subsidio:P.subsidio??null, sinSubsidio:P.sinSubsidio??null, tipoLectura:b.tipoLectura||'', hist:false, pdf:true});
+    emision:P.emision||'', vence:P.vence||'', numero:P.numero||b.numero||'', subsidio:P.subsidio??null, sinSubsidio:P.sinSubsidio??null, tipoLectura:b.tipoLectura||'', hist:false, pdf:true,
+    balance: P.balance??b.balance??null, totalPagar: P.totalPagar ?? b.totalPagar ?? null});
+  if(b.balance) b.pendiente = b.balance;
   if(image){ if(b.photoId) delPhoto(b.photoId); b.photoId = await savePhoto(image, 'bill'); }
   for(const old of S.bills.filter(x=>x.hist && x.hasta && x.hasta.slice(0,7)===b.hasta.slice(0,7))){ S.bills = S.bills.filter(x=>x.id!==old.id); await Store.del('bills', old.id); }
   const i = S.bills.findIndex(x=>x.id===b.id); if(i>=0) S.bills[i] = b; else S.bills.push(b);
@@ -1243,10 +1247,11 @@ function remindersCard(){
   const lb = S.bills.filter(x=>!x.hist && x.hasta).slice(-1)[0];
   if(lb){ const hd = parseYMD(lb.hasta); const next = ymd(new Date(hd.getFullYear(), hd.getMonth()+1, hd.getDate())); const d = daysBetween(todayStr(), next);
     if(d>=0 && d<=4) items.push({ic:I.cam, t: d===0?'Hoy es día de lectura: tómale foto al contador':'Día de lectura en '+d+' día'+(d>1?'s':'')+' ('+fDate(next)+')', act:'newReading'}); }
-  const unpaid = S.bills.filter(x=>!x.hist && x.vence && x.vence>=todayStr()).slice(-1)[0];
-  if(unpaid){ const d = daysBetween(todayStr(), unpaid.vence); if(d<=7) items.push({ic:I.clock, t:'Tu factura de '+fRD(unpaid.monto,true)+' vence '+(d===0?'hoy':'en '+d+' día'+(d>1?'s':''))+' ('+fDate(unpaid.vence)+')', id:unpaid.id}); }
+  for(const ub of unpaidBills().filter(x=>x.vence)){ const d = daysBetween(todayStr(), ub.vence);
+    if(d<0) items.push({ic:I.alert, red:true, t:'Tu factura de '+fRD(ub.totalPagar||ub.monto,true)+' venció el '+fDate(ub.vence)+'. Si ya la pagaste, márcala.', id:ub.id});
+    else if(d<=7) items.push({ic:I.clock, t:'Tu factura de '+fRD(ub.totalPagar||ub.monto,true)+' vence '+(d===0?'hoy':'en '+d+' día'+(d>1?'s':''))+' ('+fDate(ub.vence)+')', id:ub.id}); }
   if(!items.length) return '';
-  return items.map(x=>`<div class="alert y tap" ${x.act?`data-act="${x.act}"`:`data-act="openBill" data-id="${esc(x.id)}"`}>${x.ic}<div><b>${esc(x.t)}</b></div></div>`).join('');
+  return items.map(x=>`<div class="alert ${x.red?'red':'y'} tap" ${x.act?`data-act="${x.act}"`:`data-act="openBill" data-id="${esc(x.id)}"`}>${x.ic}<div><b>${esc(x.t)}</b></div></div>`).join('');
 }
 
 /* ── 2. Comandos por voz o texto ── */
@@ -1278,7 +1283,7 @@ async function runCommand(raw){
     const ref = last ? last.valor : lb ? lb.lecturaActual : null;
     if(ref!=null && (v < ref - 2 || v > ref + 5000)){ toast('¿Seguro? '+fN(v)+' no parece correcto (la última era '+fN(ref)+').'); return 'dudosa'; }
     const rec = {id:newId(), fecha:localDT(new Date()), valor:v, photoId:null, ai:false, nota:'Dicha por voz', creado:Date.now()};
-    S.readings.push(rec); sortAll(); await Store.put('readings', rec); render(); toast('Lectura '+fN(v)+' kWh guardada ✓'); return 'lectura';
+    S.readings.push(rec); sortAll(); await Store.put('readings', rec); render(); const an = anomaly(); toast(an && an.last.id===rec.id ? '⚠️ Lectura '+fN(v)+' guardada: gastas '+fN(an.rate,1)+' kWh/día, más de lo normal' : 'Lectura '+fN(v)+' kWh guardada ✓'); return 'lectura';
   }
   // "apagón de 3 horas ayer"
   const ah = low.match(/apag[óo]n\s+de\s+(\d+(?:[.,]\d)?|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)\s*(?:horas?|h)\b/);
@@ -1335,8 +1340,216 @@ async function initDictation(){
   }catch(e){}
 }
 
+/* ═════════════ ACTUALIZACIÓN 2: pagos, alertas, aparatos, reporte anual ═════════════ */
+
+/* ── Pagos ── */
+function billStatus(b){
+  if(!b || b.hist) return null;
+  if(b.pago) return {s:'pagada', t:'Pagada', d:b.pago.fecha};
+  const later = S.bills.filter(x=>!x.hist && x.id!==b.id && x.desde && b.hasta && x.desde>=b.hasta && x.balance===0);
+  if(later.length) return {s:'pagada', t:'Pagada', auto:true, d:null};
+  if(b.vence && b.vence < todayStr()) return {s:'vencida', t:'Vencida'};
+  return {s:'pendiente', t:'Por pagar'};
+}
+function payChip(b){ const st = billStatus(b); if(!st) return '';
+  return st.s==='pagada' ? `<span class="chip" style="background:var(--gsoft);color:var(--green)">${I.check} Pagada</span>` : st.s==='vencida' ? `<span class="chip red">${I.alert} Vencida</span>` : `<span class="chip y">${I.clock} Por pagar</span>`; }
+function unpaidBills(){ return S.bills.filter(x=>{ const st = billStatus(x); return st && st.s!=='pagada'; }); }
+function payCard(b){
+  const st = billStatus(b); if(!st) return '';
+  const total = b.totalPagar || b.monto;
+  if(st.s==='pagada') return `<div class="card flat"><div class="row between"><h3 class="mb0">Pago</h3>${payChip(b)}</div>
+    <div class="sub mt8">${b.pago ? `Pagaste ${fRD(b.pago.monto,true)} el ${esc(fDateY(b.pago.fecha))}${b.pago.metodo?' · '+esc(b.pago.metodo):''}` : `La factura siguiente de ${esc((DISTRIB[S.profile.distribuidora]||DISTRIB.otra).short)} salió sin balance pendiente: esta quedó pagada.`}</div>
+    ${b.pago&&b.pago.photoId?`<button class="btn2 full mt8" data-act="viewPh" data-id="${esc(b.pago.photoId)}" data-cap="Comprobante de pago">${I.img} Ver comprobante</button>`:''}
+    ${b.pago?`<button class="link mt8" style="display:block" data-act="unpay" data-id="${esc(b.id)}">Quitar pago</button>`:''}</div>`;
+  const d = b.vence ? daysBetween(todayStr(), b.vence) : null;
+  return `<div class="card ${st.s==='vencida'?'':'soft'}" ${st.s==='vencida'?'style="background:var(--rsoft)"':''}><div class="row between"><h3 class="mb0">Pago</h3>${payChip(b)}</div>
+    <div class="num" style="font-size:26px;font-weight:800;margin:4px 0">${fRD(total,true)}</div>
+    <div class="sub">${b.vence?(d<0?'Venció el '+esc(fDateY(b.vence))+'. Págala pronto para evitar mora y corte.':d===0?'Vence hoy':'Vence el '+esc(fDateY(b.vence))+' (en '+d+' día'+(d>1?'s':'')+')'):'Sin fecha de vencimiento'}${b.balance?` · incluye ${fRD(b.balance,true)} de balance anterior`:''}</div>
+    <button class="btn mt12" data-act="payBill" data-id="${esc(b.id)}"><span>Ya la pagué</span><span class="arr">${I.check}</span></button></div>`;
+}
+let draftPay = null;
+function openPay(id){
+  const b = S.bills.find(x=>x.id===id); if(!b) return;
+  draftPay = {id, fecha:todayStr(), monto: b.totalPagar || b.monto || '', metodo:'', photo:null};
+  const draw = sh=>{ sh.innerHTML = `<div class="grab"></div><h3 style="margin:2px 0 12px;font-size:19px">Registrar pago · ${esc(billLabel(b).replace('Factura de ',''))}</h3>
+    <div class="grid2"><div class="field"><label>Fecha</label><input class="inp" type="date" id="pFecha" value="${esc(draftPay.fecha)}"></div><div class="field"><label>Monto (RD$)</label><input class="inp" inputmode="decimal" id="pMonto" value="${esc(draftPay.monto)}"></div></div>
+    <div class="field"><label>¿Dónde pagaste?</label><div class="seg" style="flex-wrap:wrap">${['App del banco','Colmado / punto de pago','Oficina','Débito automático'].map(m=>`<button type="button" data-m="${esc(m)}" class="${draftPay.metodo===m?'on':''}">${esc(m)}</button>`).join('')}</div></div>
+    ${draftPay.photo?`<img src="${draftPay.photo}" class="photoview" style="max-height:160px;object-fit:cover" alt="Comprobante">`:''}
+    ${fileBtn('payphoto', false, I.img+' '+(draftPay.photo?'Cambiar comprobante':'Agregar foto del comprobante (opcional)'), 'btn2 full mt8')}
+    <button class="btn mt12" data-x="ok"><span>Guardar pago</span><span class="arr">${I.check}</span></button>`;
+    sh.querySelectorAll('[data-m]').forEach(x=>x.onclick=()=>{ draftPay.fecha=sh.querySelector('#pFecha').value; draftPay.monto=sh.querySelector('#pMonto').value; draftPay.metodo=x.dataset.m; draw(sh); });
+    sh.querySelector('[data-x=ok]').onclick = async ()=>{
+      draftPay.fecha = sh.querySelector('#pFecha').value || todayStr(); draftPay.monto = num(sh.querySelector('#pMonto').value);
+      const pago = {fecha:draftPay.fecha, monto:draftPay.monto, metodo:draftPay.metodo};
+      if(draftPay.photo) pago.photoId = await savePhoto(draftPay.photo, 'pago');
+      b.pago = pago; await Store.put('bills', b); closeSheet(); draftPay=null; render(); toast('Pago registrado ✓');
+    };
+  };
+  PICK.payphoto = ({data})=>{ if(!draftPay) return; draftPay.photo = data; const sh = document.querySelector('.sheet'); if(sh){ const f=sh.querySelector('#pFecha'), m=sh.querySelector('#pMonto'); if(f) draftPay.fecha=f.value; if(m) draftPay.monto=m.value; draw(sh); } };
+  sheet('', draw);
+}
+
+/* ── Alertas de consumo raro ── */
+function baselineRate(){
+  const full = S.bills.filter(x=>x.kwh!=null && x.desde && x.hasta).slice(-6);
+  if(!full.length) return dailyRate();
+  return full.reduce((s,x)=>s+x.kwh,0) / full.reduce((s,x)=>s+Math.max(1,daysBetween(x.desde,x.hasta)),0);
+}
+function anomaly(){
+  const r = S.readings; if(r.length<1) return null;
+  const last = r[r.length-1]; let prev = r.length>1 ? r[r.length-2] : null;
+  let pv = prev ? {valor:prev.valor, fecha:prev.fecha} : null;
+  const lb = S.bills.filter(x=>!x.hist && x.lecturaActual!=null && x.hasta).slice(-1)[0];
+  if(lb && (!pv || parseDT(lb.hasta+'T08:00') > parseDT(pv.fecha)) && parseDT(lb.hasta+'T08:00') < parseDT(last.fecha)) pv = {valor:lb.lecturaActual, fecha:lb.hasta+'T08:00', factura:true};
+  if(!pv) return null;
+  const d = (parseDT(last.fecha) - parseDT(pv.fecha))/864e5; if(d < 0.75) return null;
+  const rate = (last.valor - pv.valor)/d, base = baselineRate(); if(base==null || rate<0) return null;
+  if(rate > base*1.6 && rate - base > 2) return {rate, base, d, last, pv, x: rate/base};
+  return null;
+}
+function anomalyCard(){
+  const a = anomaly(); if(!a || (S.profile.anomVista===a.last.id)) return '';
+  return `<div class="alert red">${I.alert}<div><b>Consumo alto: ${fN(a.rate,1)} kWh por día</b> desde ${a.pv.factura?'la lectura de la factura':'tu foto'} del ${esc(fDate(a.pv.fecha))}. Lo normal en tu casa es ${fN(a.base,1)} (${fN(a.x,1)} veces más).
+    <div class="sub mt8" style="color:inherit">Revisa si algo se quedó pegado: nevera con la goma dañada, bomba de agua, calentador o un A/C encendido de más.</div>
+    <div class="row mt8" style="gap:8px"><button class="btn2" data-go="aparatos">Ver qué gasta más</button><button class="btn2" data-act="anomOk" data-id="${esc(a.last.id)}">Entendido</button></div></div></div>`;
+}
+
+/* ── Aparatos: qué gasta más ── */
+const APARATOS = [
+  {n:'Nevera / refrigerador', w:150, h:24, c:0.4, ic:'🧊'}, {n:'Abanico', w:60, h:8, c:1, ic:'🌀'}, {n:'Bombillo LED', w:10, h:6, c:1, ic:'💡'},
+  {n:'Televisor', w:100, h:5, c:1, ic:'📺'}, {n:'Aire acondicionado 12,000 BTU', w:1100, h:6, c:0.7, ic:'❄️'}, {n:'Bomba de agua', w:750, h:1, c:1, ic:'💧'},
+  {n:'Lavadora', w:500, h:1, c:1, ic:'🧺'}, {n:'Plancha', w:1000, h:0.5, c:0.6, ic:'👔'}, {n:'Microondas', w:1000, h:0.25, c:1, ic:'🍲'},
+  {n:'Licuadora', w:400, h:0.1, c:1, ic:'🥤'}, {n:'Arrocera / olla eléctrica', w:700, h:0.7, c:1, ic:'🍚'}, {n:'Calentador de agua', w:1500, h:1, c:0.8, ic:'🚿'},
+  {n:'Computadora / laptop', w:60, h:6, c:1, ic:'💻'}, {n:'Router de internet', w:10, h:24, c:1, ic:'📶'}, {n:'Cargador de celular', w:10, h:3, c:1, ic:'🔌'},
+  {n:'Freezer', w:200, h:24, c:0.45, ic:'🧊'}, {n:'Secador de pelo', w:1200, h:0.2, c:1, ic:'💨'}, {n:'Cafetera', w:800, h:0.2, c:1, ic:'☕'},
+];
+const kwhMes = a => (a.w||0) * (a.cant||1) * (a.h||0) * (a.c??1) * 30 / 1000;
+function realMonthly(){ const b = baselineRate(); return b!=null ? b*30 : null; }
+function effPrice(){ const full = S.bills.filter(x=>!x.hist && x.monto!=null && x.kwh>0).slice(-6); if(!full.length) return tariff().p1; const k = full.reduce((s,x)=>s+x.kwh,0), m = full.reduce((s,x)=>s+x.monto - (tariff().fijo||0),0); return m/k; }
+function viewAparatos(){
+  const list = S.profile.aparatos || []; const total = list.reduce((s,a)=>s+kwhMes(a),0); const real = realMonthly(); const pr = effPrice();
+  const sorted = list.slice().sort((a,b)=>kwhMes(b)-kwhMes(a)); const mx = Math.max(1, ...sorted.map(kwhMes));
+  const top = sorted[0];
+  return `<div class="wrap">${topbar('¿Qué gasta más?', 'home')}
+    <div class="card navy"><div class="lbl">Tus aparatos gastan al mes</div>
+      <div class="num" style="font-size:36px;font-weight:800;margin:4px 0">${fN(total)} kWh <span style="font-size:15px;opacity:.8">≈ ${fRD(total*pr)}</span></div>
+      ${real!=null?`<div style="font-size:13px;opacity:.8">Tu consumo real es de unos ${fN(real)} kWh/mes. ${list.length? (total>real*1.15?'Pusiste más horas de las que parece: ajústalas.': total<real*0.85?'Faltan '+fN(real-total)+' kWh que no explican tus aparatos: agrega los que falten.':'¡Cuadra con tu consumo real!') : ''}</div>`:''}
+      ${real!=null&&list.length?`<div style="height:8px;border-radius:9px;background:rgba(255,255,255,.15);margin-top:10px;overflow:hidden"><i style="display:block;height:100%;width:${Math.min(100,total/real*100)}%;background:var(--yellow)"></i></div>`:''}
+    </div>
+    ${list.length?`<div class="card list">${sorted.map(a=>{ const k=kwhMes(a); return `<div class="it tap" data-act="editAparato" data-id="${esc(a.id)}"><div class="thumb" style="background:var(--ysoft);font-size:22px">${esc(a.ic||'🔌')}</div><div style="flex:1;min-width:0"><div class="t">${esc(a.n)}${(a.cant||1)>1?' ×'+a.cant:''}</div><div class="s">${fN(a.w)} W · ${fN(a.h,1)} h/día</div><div style="height:6px;border-radius:6px;background:#EEF0F5;margin-top:5px"><i style="display:block;height:100%;width:${k/mx*100}%;background:${a===top?'var(--red)':'var(--yellow)'};border-radius:6px"></i></div></div><div class="r"><div class="t num">${fN(k)} kWh</div><div class="s num">${fRD(k*pr)}/mes</div></div></div>`; }).join('')}</div>`
+      :`<div class="card"><div class="empty"><div class="ico" style="font-size:28px">🔌</div><b>Agrega los aparatos de tu casa</b><p>Toca los que tienes abajo. Después ajusta las horas que los usas al día.</p></div></div>`}
+    ${top && list.length>1?`<div class="alert y">${I.info}<div><b>${esc(top.n)}</b> es lo que más gasta (${fN(kwhMes(top)/Math.max(total,1)*100)}% del total). ${tipFor(top)}</div></div>`:''}
+    <div class="sec-t">Toca para agregar</div>
+    <div class="row" style="flex-wrap:wrap;gap:8px">${APARATOS.map((a,i)=>`<button class="chip line" data-act="addAparato" data-i="${i}">${a.ic} ${esc(a.n)}</button>`).join('')}<button class="chip line" data-act="addAparato" data-i="-1">➕ Otro</button></div>
+    <p class="hint mt12">Los vatios (W) son aproximados; si la etiqueta del aparato dice otro número, cámbialo. Precio usado: ${fRD(pr,true)} por kWh, según tus facturas.</p>
+  </div>`;
+};
+function tipFor(a){ const n=a.n.toLowerCase();
+  if(n.includes('aire')) return 'Ponlo en 24–25 °C y con la puerta cerrada; cada hora menos al día ahorra unos '+fRD(a.w*(a.c??1)*30/1000*effPrice())+' al mes.';
+  if(n.includes('nevera')||n.includes('freezer')) return 'Revisa la goma de la puerta y no la pegues a la pared; una goma dañada la hace trabajar el doble.';
+  if(n.includes('bomba')) return 'Si se prende sola muy seguido puede haber un salidero en la tubería o en el tinaco.';
+  if(n.includes('calentador')) return 'Apágalo cuando no lo uses; mantener el agua caliente todo el día gasta mucho.';
+  if(n.includes('plancha')) return 'Plancha todo de una vez en lugar de poquito cada día.';
+  return 'Reducir sus horas de uso es lo que más baja la factura.'; }
+function editAparato(id, preset){
+  const list = S.profile.aparatos || [];
+  let a = id ? list.find(x=>x.id===id) : Object.assign({id:newId(), cant:1}, preset ? {n:preset.n, w:preset.w, h:preset.h, c:preset.c, ic:preset.ic} : {n:'', w:100, h:2, c:1, ic:'🔌'});
+  const isNew = !id;
+  sheet(`<h3 style="margin:2px 0 12px;font-size:19px">${a.ic||'🔌'} ${isNew?'Agregar aparato':'Editar aparato'}</h3>
+    <div class="field"><label>Nombre</label><input class="inp" id="aN" value="${esc(a.n)}" placeholder="Ej.: abanico del cuarto"></div>
+    <div class="grid2"><div class="field"><label>Vatios (W)</label><input class="inp" inputmode="decimal" id="aW" value="${esc(a.w)}"></div><div class="field"><label>Cantidad</label><input class="inp" inputmode="numeric" id="aC" value="${esc(a.cant||1)}"></div></div>
+    <div class="field"><label>Horas al día que está prendido</label><input class="inp" inputmode="decimal" id="aH" value="${esc(a.h)}"></div>
+    ${(a.c??1)<1?`<p class="hint">Este aparato no trabaja todo el tiempo aunque esté conectado; ya se toma en cuenta.</p>`:''}
+    <button class="btn mt8" data-x="ok"><span>Guardar</span><span class="arr">${I.check}</span></button>
+    ${!isNew?`<button class="btn2 danger full mt8" data-x="del">${I.trash} Quitar</button>`:''}`, sh=>{
+    sh.querySelector('[data-x=ok]').onclick = async ()=>{
+      a.n = sh.querySelector('#aN').value.trim() || 'Aparato'; a.w = num(sh.querySelector('#aW').value)||0; a.cant = Math.max(1, Math.round(num(sh.querySelector('#aC').value)||1)); a.h = Math.min(24, num(sh.querySelector('#aH').value)||0);
+      S.profile.aparatos = isNew ? list.concat([a]) : list.map(x=>x.id===a.id?a:x); await saveProfile(); closeSheet(); render();
+    };
+    const del = sh.querySelector('[data-x=del]'); if(del) del.onclick = async ()=>{ S.profile.aparatos = list.filter(x=>x.id!==a.id); await saveProfile(); closeSheet(); render(); };
+  });
+}
+
+/* ── Reporte anual (PDF y Excel) ── */
+function reportYears(){ return [...new Set(S.bills.filter(b=>b.hasta).map(b=>b.hasta.slice(0,4)))].sort().reverse(); }
+function reportRows(y){
+  return S.bills.filter(b=>b.hasta && b.hasta.startsWith(y)).sort((a,b)=>a.hasta<b.hasta?-1:1).map(b=>{ const o = outagesIn(b.desde, b.hasta); const st = billStatus(b);
+    return {b, mes: cap(MESES[parseYMD(b.hasta).getMonth()]), periodo: b.desde&&b.hasta ? fDate(b.desde)+' - '+fDate(b.hasta) : '', dias: b.desde&&b.hasta?daysBetween(b.desde,b.hasta):null, kwh:b.kwh, monto:b.monto, subsidio:b.subsidio, sinSub:b.sinSubsidio, apag:o.days, horas:o.hours, estado: b.hist?'Histórico':(st?st.t:''), lect: b.lecturaAnterior!=null?fN(b.lecturaAnterior)+' -> '+fN(b.lecturaActual):'' }; });
+}
+function openReport(){
+  const ys = reportYears(); if(!ys.length){ toast('Aún no hay facturas para el reporte.'); return; }
+  let y = ys[0];
+  const draw = sh=>{ const rows = reportRows(y); const tk = rows.reduce((s,r)=>s+(r.kwh||0),0), tm = rows.reduce((s,r)=>s+(r.monto||0),0), ts = rows.reduce((s,r)=>s+(r.subsidio||0),0);
+    sh.innerHTML = `<div class="grab"></div><h3 style="margin:2px 0 10px;font-size:19px">Reporte del año</h3>
+      <div class="seg">${ys.map(x=>`<button type="button" data-y="${x}" class="${x===y?'on':''}">${x}</button>`).join('')}</div>
+      <div class="card flat mt12"><div class="kv"><span>Facturas</span><b>${rows.length}</b></div><div class="kv"><span>Consumo total</span><b class="num">${fN(tk)} kWh</b></div><div class="kv"><span>Pagado</span><b class="num">${fRD(tm,true)}</b></div>${ts?`<div class="kv"><span>Subsidio recibido</span><b class="num" style="color:var(--green)">${fRD(ts,true)}</b></div>`:''}</div>
+      <button class="btn y" data-x="pdf"><span>Descargar PDF</span><span class="arr">${I.dl}</span></button>
+      <button class="btn2 full mt8" data-x="csv">${I.bill} Descargar para Excel</button>`;
+    sh.querySelectorAll('[data-y]').forEach(b=>b.onclick=()=>{ y=b.dataset.y; draw(sh); });
+    sh.querySelector('[data-x=pdf]').onclick = ()=>reportPDF(y);
+    sh.querySelector('[data-x=csv]').onclick = ()=>reportCSV(y);
+  };
+  sheet('', draw);
+}
+async function saveFile(name, blob, mime){
+  if(CAP.downloads){ try{ await CAP.downloads.save({filename:name, data:blob}); toast('Archivo listo ✓'); }catch(e){ if(e&&e.code!=='declined') toast('No se pudo guardar.'); } return; }
+  const file = new File([blob], name, {type:mime});
+  if(navigator.canShare && navigator.canShare({files:[file]}) && /android|iphone|ipad/i.test(navigator.userAgent)){ try{ await navigator.share({files:[file], title:name}); return; }catch(e){ if(e.name==='AbortError') return; } }
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 4000); toast('Descargado ✓');
+}
+function reportCSV(y){
+  const rows = reportRows(y); const q = v => v==null?'':(typeof v==='number'? String(Math.round(v*100)/100) : '"'+String(v).replace(/"/g,'""')+'"');
+  const head = ['Mes','Período','Días','Lecturas','kWh','Monto RD$','Subsidio RD$','Sin subsidio RD$','Días con apagón','Horas sin luz','Estado'];
+  const lines = [head.map(q).join(';')].concat(rows.map(r=>[r.mes,r.periodo,r.dias,r.lect,r.kwh,r.monto,r.subsidio,r.sinSub,r.apag,r.horas,r.estado].map(q).join(';')));
+  const tk = rows.reduce((s,r)=>s+(r.kwh||0),0), tm = rows.reduce((s,r)=>s+(r.monto||0),0), ts = rows.reduce((s,r)=>s+(r.subsidio||0),0);
+  lines.push(['TOTAL','','','',tk,tm,ts,'','','',''].map(q).join(';'));
+  saveFile('Cuadra_reporte_'+y+'.csv', new Blob(['﻿'+lines.join('\r\n')], {type:'text/csv'}), 'text/csv');
+}
+async function reportPDF(y){
+  if(!window.jspdf){ toast('No se pudo cargar el generador de PDF.'); return; }
+  const rows = reportRows(y); const P = S.profile; const { jsPDF } = window.jspdf; const doc = new jsPDF({unit:'mm', format:'letter'});
+  const W=215.9, M=16, navy=[20,33,61], yel=[255,201,60], mut=[107,115,133];
+  const clean = s => String(s??'').replace(/[–—]/g,'-').replace(/→/g,'->').replace(/[^\x00-\xFF]/g,'');
+  doc.setFillColor(...navy); doc.rect(0,0,W,30,'F'); doc.setTextColor(255,255,255); doc.setFont('helvetica','bold'); doc.setFontSize(16); doc.text(clean('Reporte de electricidad '+y), M, 15);
+  doc.setFont('helvetica','normal'); doc.setFontSize(9.5); doc.setTextColor(210,216,230); doc.text(clean((P.nombre||'')+'  ·  '+idLbl()+' '+(P.nic||'-')+'  ·  '+((DISTRIB[P.distribuidora]||DISTRIB.otra).short)+'  ·  Generado el '+fDateLong(todayStr())), M, 22);
+  let yy = 40;
+  const tk = rows.reduce((s,r)=>s+(r.kwh||0),0), tm = rows.reduce((s,r)=>s+(r.monto||0),0), ts = rows.reduce((s,r)=>s+(r.subsidio||0),0), th = rows.reduce((s,r)=>s+(r.horas||0),0);
+  const boxes = [['Consumo del año', fN(tk)+' kWh'], ['Pagado', fRD(tm,true)], ['Subsidio recibido', fRD(ts,true)], ['Horas sin luz', fN(th)+' h']];
+  const bw = (W-2*M-9)/4; boxes.forEach(([k,v],i)=>{ const x=M+i*(bw+3); doc.setFillColor(245,240,232); doc.roundedRect(x,yy,bw,19,3,3,'F'); doc.setFontSize(8); doc.setTextColor(...mut); doc.text(clean(k),x+4,yy+7); doc.setFontSize(12); doc.setFont('helvetica','bold'); doc.setTextColor(...navy); doc.text(clean(v),x+4,yy+14.5); doc.setFont('helvetica','normal'); });
+  yy += 27;
+  // gráfica
+  const ch = 50, cw = W-2*M, mx = Math.max(1,...rows.map(r=>r.kwh||0)), bwid = cw/Math.max(rows.length,1);
+  doc.setFontSize(10); doc.setFont('helvetica','bold'); doc.setTextColor(...navy); doc.text('Consumo por mes (kWh)', M, yy); yy += 4;
+  rows.forEach((r,i)=>{ const h = (r.kwh||0)/mx*ch; const x = M + i*bwid + bwid*0.18; doc.setFillColor(...(r.b.hist?[230,217,184]:yel)); doc.rect(x, yy+ch-h, bwid*0.64, h, 'F');
+    doc.setFontSize(7.5); doc.setTextColor(...navy); doc.text(fN(r.kwh), x+bwid*0.32, yy+ch-h-1.5, {align:'center'}); doc.setTextColor(...mut); doc.text(clean(r.mes.slice(0,3)), x+bwid*0.32, yy+ch+4.5, {align:'center'}); });
+  yy += ch + 12;
+  // tabla
+  const cols = [['Mes',20],['Período',30],['Lecturas',32],['kWh',12],['Monto',24],['Subsidio',22],['Apagones',20],['Estado',W-2*M-160]];
+  doc.setFillColor(...navy); doc.rect(M,yy,W-2*M,8,'F'); doc.setTextColor(255,255,255); doc.setFontSize(8.5); doc.setFont('helvetica','bold');
+  let x = M; cols.forEach(([t,w])=>{ doc.text(t, x+2, yy+5.4); x+=w; }); yy += 8; doc.setFont('helvetica','normal'); doc.setTextColor(25,30,45);
+  rows.forEach((r,i)=>{ if(yy>255){ doc.addPage(); yy=20; } if(i%2===0){ doc.setFillColor(245,240,232); doc.rect(M,yy,W-2*M,7,'F'); }
+    const vals = [r.mes, r.periodo, r.lect||'-', fN(r.kwh), r.monto!=null?fRD(r.monto,true):'-', r.subsidio?fRD(r.subsidio,true):'-', r.apag?r.apag+' d / '+fN(r.horas)+' h':'-', r.estado];
+    let x2 = M; vals.forEach((v,j)=>{ doc.text(clean(v), x2+2, yy+4.9); x2 += cols[j][1]; }); yy += 7; });
+  doc.setFont('helvetica','bold'); doc.setFillColor(...yel); doc.rect(M,yy,W-2*M,8,'F'); doc.setTextColor(...navy);
+  const cx = k => M + cols.slice(0,k).reduce((s,c)=>s+c[1],0) + 2;
+  doc.text('TOTAL', M+2, yy+5.4); doc.text(fN(tk), cx(3), yy+5.4); doc.text(clean(fRD(tm,true)), cx(4), yy+5.4); doc.text(clean(fRD(ts,true)), cx(5), yy+5.4);
+  yy += 16; doc.setFont('helvetica','normal'); doc.setFontSize(8.5); doc.setTextColor(...mut);
+  doc.text(clean('Los meses en color claro vienen del histórico de consumos de la factura (solo kWh). Generado con Cuadra.'), M, yy);
+  saveFile('Cuadra_reporte_'+y+'.pdf', doc.output('blob'), 'application/pdf');
+}
+
+/* ── Respaldo: aviso automático ── */
+function backupCard(){
+  if(Store.mode==='cloud') return '';
+  const has = S.bills.length || S.readings.length; if(!has) return '';
+  const lb = S.profile.lastBackup; const days = lb ? daysBetween(lb, todayStr()) : null;
+  if(days!=null && days < 30) return '';
+  return `<div class="alert b tap" data-act="backup">${I.cloud}<div><b>${lb?'Hace '+days+' días que no haces respaldo':'Haz tu primer respaldo'}</b><div class="sub" style="color:inherit">Tus datos solo están en este celular. Toca aquí para guardar una copia.</div></div></div>`;
+}
+
 /* ───────────── vistas ───────────── */
 const Views = {};
+Views.aparatos = viewAparatos;
 
 /* INICIO */
 Views.home = function(){
@@ -1356,7 +1569,9 @@ Views.home = function(){
   return `<div class="wrap">
     <div class="top"><div><div class="hello">${p.nombre?'Hola, '+esc(p.nombre.split(' ')[0]):'Hola'} 👋</div><div class="big-title">Mi luz</div></div><button class="iconbtn" data-go="ajustes" aria-label="Ajustes">${I.gear}</button></div>
     ${commandBar()}
+    ${anomalyCard()}
     ${remindersCard()}
+    ${backupCard()}
     ${outageCard()}
     <div class="card navy">
       <div class="row between"><span class="lbl">Última lectura de tu contador</span>${last?`<span class="chip" style="background:rgba(255,255,255,.12);color:#fff">${esc(ago(last.fecha))}</span>`:''}</div>
@@ -1369,6 +1584,10 @@ Views.home = function(){
       <div class="row between"><h3 class="mb0">${esc(billLabel(lastBill))}</h3>${verdictChip(A)}</div>
       <div class="row mt8 billstats" style="gap:16px"><div class="stat"><div class="k">Te cobraron</div><div class="v num">${fN(lastBill.kwh)} <span style="font-size:12px">kWh</span></div></div>${A.medido!=null?`<div class="stat"><div class="k">Tu contador marcó</div><div class="v num">${fN(A.medido)} <span style="font-size:12px">kWh</span></div></div>`:''}${A.sobra>0&&A.verdict==='no'?`<div class="stat"><div class="k">Te sobran</div><div class="v num" style="color:var(--red)">${fRD(A.sobra)}</div></div>`:''}</div>
     </div>`:''}
+    ${(()=>{ const u = unpaidBills(); const full = S.bills.filter(x=>!x.hist);
+      if(!full.length) return '';
+      return `<div class="grid2 ${lastBill?'':'mt12'}" style="margin-bottom:12px"><div class="card tap mb0" ${u.length?`data-act="openBill" data-id="${esc(u[u.length-1].id)}"`:'data-go="facturas"'}><div class="lbl" style="color:var(--muted)">Pagos</div><div class="stat"><div class="v" style="font-size:18px;color:${u.some(x=>billStatus(x).s==='vencida')?'var(--red)':u.length?'#8A6300':'var(--green)'}">${u.length? (u.length===1?'1 por pagar':u.length+' por pagar') : 'Al día ✓'}</div><div class="sub">${u.length?fRD(u.reduce((s,x)=>s+(x.totalPagar||x.monto||0),0),true):'Todo pagado'}</div></div></div>
+        <div class="card tap mb0" data-go="aparatos"><div class="lbl" style="color:var(--muted)">¿Qué gasta más?</div><div class="stat"><div class="v" style="font-size:18px">${(S.profile.aparatos||[]).length? '🔌 '+(S.profile.aparatos.length)+' aparatos':'🔌 Calcular'}</div><div class="sub">${(S.profile.aparatos||[]).length? fN((S.profile.aparatos).reduce((s,a)=>s+kwhMes(a),0))+' kWh/mes':'Nevera, A/C, bomba…'}</div></div></div></div>`; })()}
     <div class="grid2 ${lastBill?'':'mt12'}">
       <div class="card tap mb0" data-go="apagones"><div class="lbl" style="color:var(--muted)">Apagones de ${MESES[now.getMonth()]}</div><div class="stat"><div class="v num">${mo.length} <span style="font-size:13px">días</span></div><div class="sub">${fN(moH)} horas sin luz</div></div></div>
       <div class="card tap mb0" data-go="reclamos"><div class="lbl" style="color:var(--muted)">Reclamos activos</div><div class="stat"><div class="v num">${active.length}</div><div class="sub">${active.length?claimDeadlineTxt(active[0]):'Ninguno abierto'}</div></div></div>
@@ -1414,7 +1633,7 @@ Views.nuevaLectura = function(p){
     </div>
     <div class="camcard">
       <div class="row between"><span class="sub" style="font-weight:700">Lectura del contador${d.ai?'<span class="aibadge">'+I.spark.replace('<svg','<svg style="width:11px;height:11px"')+' IA</span>':''}</span><span class="sub row" style="gap:6px">${status}</span></div>
-      <div class="row" style="align-items:baseline;gap:6px"><input id="rVal" class="readinp num" inputmode="numeric" placeholder="00000" value="${d.valor!=null?esc(d.valor):''}" autocomplete="off"><b style="font-size:16px">kWh</b></div>
+      <div class="row" style="align-items:baseline;gap:6px"><input id="rVal" class="readinp num" inputmode="numeric" placeholder="${(()=>{ const F = forecast(); const last = S.readings.filter(x=>x.id!==d.id).slice(-1)[0]; if(F){ const lbv = F.lb.lecturaActual; const est = lbv + F.rate*((Date.now()-parseDT(F.lb.hasta+'T08:00'))/864e5); return '≈ '+fN(est); } return last? '≈ '+fN(last.valor) : '00000'; })()}" value="${d.valor!=null?esc(d.valor):''}" autocomplete="off"><b style="font-size:16px">kWh</b></div>
       ${lowWarn?`<div class="alert red" style="margin:8px 0 0">${I.alert}<div>Es menor que tu lectura anterior (${fN(last.valor)}). ¿Cambiaron el contador o hay un error?</div></div>`:''}
       <div class="row mt12" style="flex-wrap:wrap;gap:8px">
         <label class="chip line" style="position:relative">${I.cal} <input id="rDate" type="datetime-local" value="${esc(d.fecha)}" style="border:0;font:inherit;font-weight:700;background:transparent;color:var(--ink);max-width:180px"></label>
@@ -1464,7 +1683,7 @@ async function saveReading(){
   const rec = {id:d.id, fecha:d.fecha, valor:d.valor, photoId, ai:!!d.ai, nota:d.nota||'', creado:d.creado||Date.now()};
   const i = S.readings.findIndex(x=>x.id===rec.id); if(i>=0) S.readings[i]=rec; else S.readings.push(rec);
   sortAll(); await Store.put('readings', rec);
-  draftR = null; toast('Lectura guardada ✓'); go('lecturas');
+  draftR = null; go('lecturas'); const an = anomaly(); toast(an && an.last.id===rec.id ? '⚠️ Lectura guardada: estás gastando '+fN(an.rate,1)+' kWh/día, más de lo normal ('+fN(an.base,1)+')' : 'Lectura guardada ✓');
 }
 function openReading(id){
   const x = S.readings.find(r=>r.id===id); if(!x) return;
@@ -1485,7 +1704,8 @@ Views.facturas = function(){
     ${fileBtn('billpdf', false, `<span class="row" style="gap:10px">${I.dl.replace('<svg','<svg style="width:22px;height:22px;transform:rotate(180deg)"')} Subir PDF de la factura</span><span class="arr">${I.arr}</span>`, 'btn y', 'application/pdf,.pdf', true)}
     <p class="hint" style="margin:6px 8px 14px">El PDF que te manda ${esc((DISTRIB[S.profile.distribuidora]||DISTRIB.otra).short)} por correo se lee solo. Puedes subir varios a la vez.</p>
     ${b.length>=3?billsChart():''}
-    ${b.length?`<div class="card list">${b.map(x=>{ const A=analyzeBill(x); return `<div class="it tap" data-act="openBill" data-id="${esc(x.id)}"><div class="thumb" ${x.photoId?`data-photo="${esc(x.photoId)}"`:''}>${I.bill}</div><div><div class="t">${esc(cap(billLabel(x).replace('Factura de ','')))}</div><div class="s">${esc(fDate(x.desde))} – ${esc(fDate(x.hasta))} · ${fN(x.kwh)} kWh</div><div class="s">${x.hist?'Del histórico':fRD(x.monto,true)}</div></div><div class="r">${x.hist?'':verdictChip(A)}</div></div>`; }).join('')}</div>`
+    ${b.length?`<button class="btn2 full" style="margin-bottom:14px" data-act="report">${I.dl} Reporte del año (PDF / Excel)</button>`:''}
+    ${b.length?`<div class="card list">${b.map(x=>{ const A=analyzeBill(x); return `<div class="it tap" data-act="openBill" data-id="${esc(x.id)}"><div class="thumb" ${x.photoId?`data-photo="${esc(x.photoId)}"`:''}>${I.bill}</div><div><div class="t">${esc(cap(billLabel(x).replace('Factura de ','')))}</div><div class="s">${esc(fDate(x.desde))} – ${esc(fDate(x.hasta))} · ${fN(x.kwh)} kWh</div><div class="s">${x.hist?'Del histórico':fRD(x.monto,true)}</div></div><div class="r" style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">${x.hist?'':verdictChip(A)}${x.hist?'':(billStatus(x).s!=='pagada'?payChip(x):'')}</div></div>`; }).join('')}</div>`
     :`<div class="card"><div class="empty"><div class="ico">${I.bill}</div><b>Agrega tu factura</b><p>Tómale foto y la IA saca los datos: período, kWh, lecturas y monto.</p></div><button class="btn y" data-act="newBill"><span>Agregar factura</span><span class="arr">${I.plus}</span></button></div>`}
   </div>`;
 };
@@ -1597,6 +1817,9 @@ Views.cuadra = function(p){
     ${A.flags.filter(f=>!f.soft).map(f=>`<div class="alert red">${I.alert}<div>${esc(f.t)}</div></div>`).join('')}
     ${main}
     ${A.flags.filter(f=>f.soft).map(f=>`<div class="alert y">${I.info}<div>${esc(f.t)}</div></div>`).join('')}
+    ${payCard(b)}
+    ${(()=>{ if(!b.hasta) return ''; const ly = (parseInt(b.hasta.slice(0,4))-1)+b.hasta.slice(4,7); const o = S.bills.find(x=>x.hasta && x.hasta.slice(0,7)===ly && x.kwh!=null); if(!o || !b.kwh) return ''; const ch = b.kwh/o.kwh-1;
+      return `<div class="alert ${ch>0.15?'y':'g'}">${ch>0?I.alert:I.check}<div>Comparado con ${esc(MESES[parseYMD(b.hasta).getMonth()])} del año pasado (${fN(o.kwh)} kWh), gastaste <b>${fN(Math.abs(ch*100))}% ${ch>=0?'más':'menos'}</b>.</div></div>`; })()}
     ${A.checks.length?`<div class="card"><div class="row between"><h3 class="mb0">Revisión de la factura</h3>${A.checksOk?'<span class="chip" style="background:var(--gsoft);color:var(--green)">Todo bien</span>':'<span class="chip red">Revisar</span>'}</div>
       ${A.checks.map(c=>`<div class="row mt8" style="align-items:flex-start;gap:10px"><span style="flex:none;width:24px;height:24px;border-radius:8px;display:grid;place-items:center;background:${c.ok?'var(--gsoft)':'var(--rsoft)'};color:${c.ok?'var(--green)':'var(--red)'}">${(c.ok?I.check:I.x).replace('<svg','<svg style="width:14px;height:14px"')}</span><span style="font-size:14px">${esc(c.t)}</span></div>`).join('')}
       ${A.checksOk&&A.medido==null?`<p class="hint mt8">Los números de la factura están bien hechos. Lo único que la factura no prueba es que la lectura sea la real de tu contador: para eso son tus fotos.</p>`:''}</div>`:''}
@@ -1840,9 +2063,11 @@ Views.ajustes = function(){
       <p class="hint">${esc(DEFAULT_TARIFF.ref)}</p>
       <button class="btn2 mt8" data-act="resetTariff">Restaurar tarifa de referencia</button>
     </div>
+    <button class="card row between tap" data-go="aparatos" style="width:100%;text-align:left"><span><b>🔌 ¿Qué aparato gasta más?</b><br><span class="sub">Calcula el consumo de cada aparato de tu casa</span></span>${I.arr.replace('<svg','<svg style="width:18px;height:18px"')}</button>
     <div class="card"><h3>Datos y respaldo</h3>
       <div class="row" style="gap:10px;margin-bottom:10px">${I.cloud.replace('<svg','<svg style="width:22px;height:22px"')}<div class="sub">${Store.mode==='cloud'?'Guardado en tu cuenta. Lo ves desde cualquier dispositivo donde abras esta app.':Store.mode==='local'?'Guardado solo en este dispositivo/navegador. Haz respaldos de vez en cuando.':'Modo temporal: al cerrar se pierde. Descarga un respaldo.'}</div></div>
       <div class="sub" style="margin-bottom:10px">${S.readings.length} lecturas · ${S.bills.length} facturas · ${S.claims.length} reclamos · ${Object.values(S.outages).reduce((s,m)=>s+Object.keys(m).length,0)} días de apagón</div>
+      ${S.profile.lastBackup?`<p class="hint" style="margin:0 0 8px">Último respaldo: ${esc(fDateY(S.profile.lastBackup))}</p>`:''}
       <div class="grid2"><button class="btn2" data-act="backup">${I.dl} Respaldo</button>${fileBtn('restore', false, 'Restaurar', 'btn2', '.json,application/json')}</div>
       ${S.profile.demo?`<button class="btn2 danger full mt8" data-act="clearDemo">Quitar datos de ejemplo</button>`:`<button class="btn2 full mt8" data-act="loadDemo">${I.spark} Cargar datos de ejemplo</button>`}
       <button class="btn2 danger full mt8" data-act="wipe">${I.trash} Borrar todos mis datos</button>
@@ -1945,10 +2170,10 @@ async function downloadPDF(c){
 
 /* ───────────── respaldo / ejemplo ───────────── */
 async function backup(){
-  const photos = {}; const ids = new Set([...S.readings.map(r=>r.photoId), ...S.bills.map(b=>b.photoId), ...S.claims.flatMap(c=>(c.extra||[]).map(e=>e.id))].filter(Boolean));
+  const photos = {}; const ids = new Set([...S.readings.map(r=>r.photoId), ...S.bills.map(b=>b.photoId), ...S.bills.map(b=>b.pago&&b.pago.photoId), ...S.claims.flatMap(c=>(c.extra||[]).map(e=>e.id))].filter(Boolean));
   for(const id of ids){ const d = await photoData(id); if(d) photos[id]=d; }
   const data = JSON.stringify({app:'cuadra', v:1, fecha:new Date().toISOString(), profile:S.profile, readings:S.readings, bills:S.bills, claims:S.claims, outages:S.outages, photos});
-  const name = 'cuadra-respaldo-'+todayStr()+'.json';
+  const name = 'cuadra-respaldo-'+todayStr()+'.json'; S.profile.lastBackup = todayStr(); saveProfile();
   if(CAP.downloads){ try{ await CAP.downloads.save({filename:name, data}); toast('Respaldo guardado ✓'); }catch(e){ if(e&&e.code!=='declined') toast('No se pudo guardar.'); } return; }
   const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([data],{type:'application/json'})); a.download=name; document.body.appendChild(a); a.click(); setTimeout(()=>a.remove(), 3000); toast('Respaldo descargado ✓');
 }
@@ -2015,7 +2240,8 @@ async function applySeed(){
   for(const [k,v] of Object.entries(SD.profile)){ if(first || !S.profile[k]) S.profile[k] = v; }
   S.profile.tarifa = Object.assign({}, S.profile.tarifa||{}, SD.tarifa); S.profile.onboarded = true; S.profile.seed = SD.v;
   for(const b0 of SD.bills){
-    if(S.bills.find(x=>x.id===b0.id)) continue;
+    const exist = S.bills.find(x=>x.id===b0.id);
+    if(exist){ let ch=false; for(const [k,v] of Object.entries(b0)){ if(k!=='photo' && exist[k]===undefined){ exist[k]=v; ch=true; } } if(ch) await Store.put('bills', exist); continue; }
     if(!b0.hist){ for(const old of S.bills.filter(x=>x.hist && x.hasta===b0.hasta)){ S.bills = S.bills.filter(x=>x.id!==old.id); await Store.del('bills', old.id); } }
     else if(S.bills.find(x=>!x.hist && x.hasta===b0.hasta)) continue;
     const b = Object.assign({}, b0, {creado:Date.now()}); if(b.photo){ b.photoId = await savePhoto(b.photo,'bill'); } delete b.photo; S.bills.push(b); await Store.put('bills', b);
@@ -2040,6 +2266,12 @@ document.addEventListener('click', async e=>{
     case 'back': { const to = a.dataset.to; if(to==='cuadra') go('cuadra',{id:id||a.dataset.id, tab:'facturas'},{noHash:true}); else go(to||'home'); break; }
     case 'newReading': startReading(); break;
     case 'startOutage': startOutage(); break;
+    case 'payBill': openPay(id); break;
+    case 'unpay': { const b = S.bills.find(x=>x.id===id); if(b){ if(b.pago&&b.pago.photoId) delPhoto(b.pago.photoId); delete b.pago; await Store.put('bills', b); render(); } break; }
+    case 'anomOk': S.profile.anomVista = id; await saveProfile(); render(); break;
+    case 'addAparato': { const i = +a.dataset.i; editAparato(null, i>=0 ? APARATOS[i] : null); break; }
+    case 'editAparato': editAparato(id); break;
+    case 'report': openReport(); break;
     case 'endOutage': endOutage(); break;
     case 'editOutageStart': editOutageStart(); break;
     case 'cmdSend': { const el = $('#cmdIn'); const v = el.value; el.value=''; if(DICT && dictOn) DICT.stop(); runCommand(v); break; }

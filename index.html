@@ -1322,12 +1322,26 @@ async function runCommand(raw){
   return 'nada';
 }
 let DICT = null, dictOn = false;
+/* micrófono propio del navegador (Chrome / Safari) cuando la app se abre fuera de Claude */
+const SRC = !(window.claude) && (window.SpeechRecognition || window.webkitSpeechRecognition) || null;
+let SREC = null;
+function srToggle(){
+  if(SREC){ try{ SREC.stop(); }catch(e){} return; }
+  const rec = new SRC(); SREC = rec; rec.lang = 'es-DO'; rec.interimResults = true; rec.continuous = false; rec.maxAlternatives = 1;
+  let finalTxt = '';
+  const el = $('#cmdIn'); if(el){ el.value=''; el.placeholder='Escuchando… habla ahora'; }
+  dictOn = true; const b = $('.cmdmic'); if(b) b.classList.add('on');
+  rec.onresult = ev=>{ let interim=''; for(let i=ev.resultIndex;i<ev.results.length;i++){ const t = ev.results[i][0].transcript; if(ev.results[i].isFinal) finalTxt += t; else interim += t; } const e2=$('#cmdIn'); if(e2) e2.value = (finalTxt+' '+interim).trim(); };
+  rec.onerror = ev=>{ if(ev.error==='not-allowed'||ev.error==='service-not-allowed') toast('Permite el micrófono para esta página en el navegador.'); else if(ev.error==='no-speech') toast('No te escuché. Toca el micrófono y habla.'); };
+  rec.onend = ()=>{ SREC=null; dictOn=false; const b2=$('.cmdmic'); if(b2) b2.classList.remove('on'); const e2=$('#cmdIn'); if(e2){ e2.placeholder='Dile: “se fue la luz”, “el contador marca…”'; const v=e2.value.trim(); if(v){ e2.value=''; runCommand(v); } } };
+  try{ rec.start(); }catch(e){ SREC=null; dictOn=false; toast('No se pudo usar el micrófono.'); }
+}
 function commandBar(){
   return `<form class="cmdbar" data-form="cmd" onsubmit="return false">
     <input class="cmdin" id="cmdIn" placeholder="Dile: “se fue la luz”, “el contador marca…”" autocomplete="off" enterkeyhint="send">
-    ${DICT?`<button type="button" class="cmdmic ${dictOn?'on':''}" data-act="dictate" aria-label="Hablar">${I.mic}</button>`:''}
+    ${(DICT||SRC)?`<button type="button" class="cmdmic ${dictOn?'on':''}" data-act="dictate" aria-label="Hablar">${I.mic}</button>`:''}
     <button type="submit" class="cmdgo" data-act="cmdSend" aria-label="Enviar">${I.arr}</button>
-  </form>${!DICT?`<p class="hint" style="margin:-6px 6px 12px">Para hablar, toca el micrófono de tu teclado.</p>`:''}`;
+  </form>${!(DICT||SRC)?`<p class="hint" style="margin:-6px 6px 12px">Para hablar, toca el micrófono de tu teclado.</p>`:''}`;
 }
 async function initDictation(){
   if(!(window.claude && typeof window.claude.use==='function')) return;
@@ -2275,7 +2289,7 @@ document.addEventListener('click', async e=>{
     case 'endOutage': endOutage(); break;
     case 'editOutageStart': editOutageStart(); break;
     case 'cmdSend': { const el = $('#cmdIn'); const v = el.value; el.value=''; if(DICT && dictOn) DICT.stop(); runCommand(v); break; }
-    case 'dictate': { if(!DICT) break; if(dictOn){ DICT.stop().catch(()=>{}); } else { DICT.start({language:'es'}).catch(err=>{ if(err&&err.code==='not_granted'){ DICT=null; render(); } else if(err&&err.code!=='stopped') toast('No se pudo usar el micrófono.'); }); } break; }
+    case 'dictate': { if(!DICT && SRC){ srToggle(); break; } if(!DICT) break; if(dictOn){ DICT.stop().catch(()=>{}); } else { DICT.start({language:'es'}).catch(err=>{ if(err&&err.code==='not_granted'){ DICT=null; render(); } else if(err&&err.code!=='stopped') toast('No se pudo usar el micrófono.'); }); } break; }
     case 'cancelReading': draftR=null; go(S.readings.length?'lecturas':'home'); break;
     case 'rNote': sheet(`<h3 style="margin:0 0 10px">Nota de la lectura</h3><input class="inp" id="nTxt" value="${esc(draftR.nota||'')}" placeholder="Ej.: foto tomada cuando pasó el lector"><button class="btn mt12" data-x="ok"><span>Listo</span><span class="arr">${I.check}</span></button>`, sh=>{ sh.querySelector('[data-x=ok]').onclick=()=>{ draftR.nota = sh.querySelector('#nTxt').value.trim(); closeSheet(); render(); }; }); break;
     case 'aiReadMeter': runMeterAI(); break;
